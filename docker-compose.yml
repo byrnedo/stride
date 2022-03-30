@@ -1,0 +1,9 @@
+version: "3.3"
+
+services:
+  rabbit:
+    build:
+      dockerfile: Rabbit.Dockerfile
+      context: .
+    ports:
+      - 6379:61613
