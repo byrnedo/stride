@@ -15,9 +15,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use tokio::sync::{mpsc, oneshot};
 use tracing::{debug, error};
 
-pub(crate) fn connections(
-    socket: TcpStream,
-) -> (ReadSender, Receiver<SessionEvent>, WriteSender) {
+pub(crate) fn connections(socket: TcpStream) -> (ReadSender, Receiver<SessionEvent>, WriteSender) {
     let (read_cmd_tx, read_cmd_rx) = mpsc::channel::<ReaderCommand>(100);
     let (read_res_tx, read_res_rx) = mpsc::channel::<SessionEvent>(100);
     let (write_cmd_tx, write_cmd_rx) = mpsc::channel::<WriterCommand>(100);
@@ -40,7 +38,11 @@ pub(crate) fn connections(
     };
     tokio::task::spawn(rc.work_loop(read_cmd_rx));
     tokio::task::spawn(wc.work_loop());
-    (ReadSender(read_cmd_tx), read_res_rx, WriteSender(write_cmd_tx2))
+    (
+        ReadSender(read_cmd_tx),
+        read_res_rx,
+        WriteSender(write_cmd_tx2),
+    )
 }
 
 pub struct WriteTransmission {
@@ -250,20 +252,28 @@ pub(crate) struct ReadSender(Sender<ReaderCommand>);
 
 impl ReadSender {
     pub async fn shutdown(&self) -> crate::Result<()> {
-        self.0.send(ReaderCommand::Shutdown()).await.map_err(|e| Error::ChannelError(e.to_string()))
+        self.0
+            .send(ReaderCommand::Shutdown())
+            .await
+            .map_err(|e| Error::ChannelError(e.to_string()))
     }
-    pub async fn send(&self, cmd: ReaderCommand) -> crate::Result<()>{
-        self.0.send(cmd).await.map_err(|e| Error::ChannelError(e.to_string()))
+    pub async fn send(&self, cmd: ReaderCommand) -> crate::Result<()> {
+        self.0
+            .send(cmd)
+            .await
+            .map_err(|e| Error::ChannelError(e.to_string()))
     }
 }
-
 
 #[derive(Clone)]
 pub(crate) struct WriteSender(Sender<WriterCommand>);
 
 impl WriteSender {
-    pub async fn shutdown(&self) ->crate::Result<()> {
-        self.0.send(WriterCommand::Shutdown()).await.map_err(|e| Error::ChannelError(e.to_string()))
+    pub async fn shutdown(&self) -> crate::Result<()> {
+        self.0
+            .send(WriterCommand::Shutdown())
+            .await
+            .map_err(|e| Error::ChannelError(e.to_string()))
     }
     pub async fn send_frame(&self, fr: Frame) -> crate::Result<()> {
         let (tx, rx) = oneshot::channel::<crate::Result<()>>();

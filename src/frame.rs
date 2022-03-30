@@ -67,7 +67,7 @@ pub trait ToFrameBody {
 }
 
 impl<'b> ToFrameBody for &'b [u8] {
-    fn to_frame_body<'a>(&'a self) -> &'a [u8] {
+    fn to_frame_body(&self) -> &[u8] {
         self
     }
 }

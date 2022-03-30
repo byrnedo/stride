@@ -1,4 +1,4 @@
-use crate::connection::{connections, ReaderCommand, SubscribeMessage, WriteSender, ReadSender};
+use crate::connection::{connections, ReadSender, ReaderCommand, SubscribeMessage, WriteSender};
 use crate::connection_config::ConnectionConfig;
 use crate::frame::Frame;
 use crate::header;
@@ -8,7 +8,7 @@ use std::{fmt, io};
 use tokio::net::tcp::ReuniteError;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::{Receiver};
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::Mutex;
 use tracing::{debug, info};
 
