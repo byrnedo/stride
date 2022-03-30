@@ -1,6 +1,6 @@
-use crate::header::HeaderList;
 use crate::frame::Frame;
-use tracing::{debug};
+use crate::header::HeaderList;
+use tracing::debug;
 
 #[derive(Debug, Copy, Clone)]
 pub enum AckMode {
@@ -30,17 +30,20 @@ pub trait MessageHandler {
 }
 
 pub struct Subscription {
-    pub id: String,
     pub destination: String,
     pub ack_mode: AckMode,
     pub headers: HeaderList,
-    pub handler: Box<dyn MessageHandler + Send>
+    pub handler: Box<dyn MessageHandler + Send>,
 }
 
-impl  Subscription {
-    pub fn new(id: u32, destination: &str, ack_mode: AckMode, headers: HeaderList,  message_handler: Box<dyn MessageHandler + Send>) -> Subscription {
+impl Subscription {
+    pub fn new(
+        destination: &str,
+        ack_mode: AckMode,
+        headers: HeaderList,
+        message_handler: Box<dyn MessageHandler + Send>,
+    ) -> Subscription {
         Subscription {
-            id: format!("stomp-rs/{}", id),
             destination: destination.to_string(),
             ack_mode,
             headers,
@@ -49,17 +52,20 @@ impl  Subscription {
     }
 }
 
-pub trait ToMessageHandler <'a> {
+pub trait ToMessageHandler<'a> {
     fn to_message_handler(self) -> Box<dyn MessageHandler + 'a>;
 }
 
-impl <'a, T: 'a> ToMessageHandler <'a> for T where T: MessageHandler {
+impl<'a, T: 'a> ToMessageHandler<'a> for T
+where
+    T: MessageHandler,
+{
     fn to_message_handler(self) -> Box<dyn MessageHandler + 'a> {
         Box::new(self) as Box<dyn MessageHandler>
     }
 }
 
-impl <'a> ToMessageHandler <'a> for Box<dyn MessageHandler + 'a> {
+impl<'a> ToMessageHandler<'a> for Box<dyn MessageHandler + 'a> {
     fn to_message_handler(self) -> Box<dyn MessageHandler + 'a> {
         self
     }
@@ -89,7 +95,10 @@ impl <'a> ToMessageHandler <'a> for Box<dyn MessageHandler + 'a> {
 //     }
 // }
 
-impl <F> MessageHandler for F where F : FnMut(&Frame) -> AckOrNack {
+impl<F> MessageHandler for F
+where
+    F: FnMut(&Frame) -> AckOrNack,
+{
     fn on_message(&mut self, frame: &Frame) -> AckOrNack {
         debug!("Passing frame to closure...");
         self(frame)

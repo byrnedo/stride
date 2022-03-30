@@ -1,5 +1,5 @@
-use std::cmp::max;
 use crate::header::HeaderList;
+use std::cmp::max;
 
 #[derive(Clone, Copy)]
 pub struct HeartBeat(pub u32, pub u32);

@@ -1,12 +1,11 @@
-use crate::client::{Client};
-use crate::connection_config::{HeartBeat, ConnectionConfig};
+use crate::client::Client;
+use crate::connection_config::{ConnectionConfig, HeartBeat};
 use crate::header::HeaderList;
 use crate::header_list;
+use crate::option_setter::OptionSetter;
 use std::io;
 use std::net::ToSocketAddrs;
 use tokio::net::TcpStream;
-use crate::option_setter::OptionSetter;
-
 
 pub struct ClientBuilder {
     pub config: ConnectionConfig,
@@ -58,7 +57,8 @@ impl ClientBuilder {
 
     #[allow(dead_code)]
     pub fn with<'b, T>(self, option_setter: T) -> ClientBuilder
-        where T: OptionSetter<ClientBuilder>
+    where
+        T: OptionSetter<ClientBuilder>,
     {
         option_setter.set_option(self)
     }

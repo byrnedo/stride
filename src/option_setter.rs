@@ -1,7 +1,9 @@
-use crate::header::{Header, SuppressedHeader};
 use crate::client_builder::ClientBuilder;
+use crate::header::{Header, SuppressedHeader};
 // use crate::message_builder::MessageBuilder;
-use crate::connection_config::{HeartBeat, Credentials, OwnedCredentials};
+use crate::connection_config::{Credentials, HeartBeat, OwnedCredentials};
+use crate::subscription::AckMode;
+use crate::subscription_builder::SubscriptionBuilder;
 
 pub trait OptionSetter<T> {
     fn set_option(self, builder: T) -> T;
@@ -54,32 +56,35 @@ impl<'b> OptionSetter<ClientBuilder> for Credentials<'b> {
 impl<'b> OptionSetter<ClientBuilder> for SuppressedHeader<'b> {
     fn set_option(self, mut builder: ClientBuilder) -> ClientBuilder {
         let SuppressedHeader(key) = self;
-        builder.config.headers.retain(|header| (*header).get_key() != key);
+        builder
+            .config
+            .headers
+            .retain(|header| (*header).get_key() != key);
         builder
     }
 }
 
-// impl <'a> OptionSetter<SubscriptionBuilder<'a>> for Header {
-//     fn set_option(self, mut builder: SubscriptionBuilder<'a>) -> SubscriptionBuilder<'a> {
-//         builder.headers.push(self);
-//         builder
-//     }
-// }
-//
-// impl <'a, 'b> OptionSetter<SubscriptionBuilder<'b>> for SuppressedHeader<'a> {
-//     fn set_option(self, mut builder: SubscriptionBuilder<'b>) -> SubscriptionBuilder<'b> {
-//         let SuppressedHeader(key) = self;
-//         builder.headers.retain(|header| (*header).get_key() != key);
-//         builder
-//     }
-// }
-//
-// impl <'a> OptionSetter<SubscriptionBuilder<'a>> for AckMode  {
-//     fn set_option(self, mut builder: SubscriptionBuilder<'a>) -> SubscriptionBuilder<'a> {
-//         builder.ack_mode = self;
-//         builder
-//     }
-// }
+impl<'a> OptionSetter<SubscriptionBuilder<'a>> for Header {
+    fn set_option(self, mut builder: SubscriptionBuilder<'a>) -> SubscriptionBuilder<'a> {
+        builder.headers.push(self);
+        builder
+    }
+}
+
+impl<'a, 'b> OptionSetter<SubscriptionBuilder<'b>> for SuppressedHeader<'a> {
+    fn set_option(self, mut builder: SubscriptionBuilder<'b>) -> SubscriptionBuilder<'b> {
+        let SuppressedHeader(key) = self;
+        builder.headers.retain(|header| (*header).get_key() != key);
+        builder
+    }
+}
+
+impl<'a> OptionSetter<SubscriptionBuilder<'a>> for AckMode {
+    fn set_option(self, mut builder: SubscriptionBuilder<'a>) -> SubscriptionBuilder<'a> {
+        builder.ack_mode = self;
+        builder
+    }
+}
 //
 // impl <'a> OptionSetter<MessageBuilder<'a>> for GenerateReceipt {
 //     fn set_option(self, mut builder: MessageBuilder<'a>) -> MessageBuilder<'a> {

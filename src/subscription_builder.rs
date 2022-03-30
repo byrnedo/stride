@@ -1,65 +1,33 @@
-// use crate::::session::{Session, ReceiptRequest, OutstandingReceipt};
-// use crate::subscription::{AckMode, Subscription};
-// use crate::header::HeaderList;
-// use crate::frame::Frame;
-// use crate::option_setter::OptionSetter;
-// use log::{debug};
-//
-// pub struct SubscriptionBuilder<'a> {
-//     pub session: &'a mut Session,
-//     pub destination: String,
-//     pub ack_mode: AckMode,
-//     pub headers: HeaderList,
-//     pub receipt_request: Option<ReceiptRequest>
-// }
-//
-// impl<'a> SubscriptionBuilder<'a> {
-//     pub fn new(session: &'a mut Session,
-//                destination: String) -> Self {
-//         SubscriptionBuilder {
-//             session: session,
-//             destination: destination,
-//             ack_mode: AckMode::Auto,
-//             headers: HeaderList::new(),
-//             receipt_request: None
-//         }
-//     }
-//
-//     #[allow(dead_code)]
-//     pub fn start(mut self) -> String {
-//         let next_id = self.session.generate_subscription_id();
-//         let subscription = Subscription::new(next_id,
-//                                              &self.destination,
-//                                              self.ack_mode,
-//                                              self.headers.clone());
-//         let mut subscribe_frame = Frame::subscribe(&subscription.id,
-//                                                    &self.destination,
-//                                                    self.ack_mode);
-//
-//         subscribe_frame.headers.concat(&mut self.headers);
-//
-//         self.session.send_frame(subscribe_frame.clone());
-//
-//         debug!("Registering callback for subscription id '{}' from builder",
-//                subscription.id);
-//         let id_to_return = subscription.id.to_string();
-//         self.session.state.subscriptions.insert(subscription.id.to_string(), subscription);
-//         if self.receipt_request.is_some() {
-//             let request = self.receipt_request.unwrap();
-//             self.session.state.outstanding_receipts.insert(
-//                 request.id,
-//                 OutstandingReceipt::new(
-//                     subscribe_frame.clone(),
-//                 )
-//             );
-//         }
-//         id_to_return
-//     }
-//
-//     #[allow(dead_code)]
-//     pub fn with<T>(self, option_setter: T) -> SubscriptionBuilder<'a>
-//         where T: OptionSetter<SubscriptionBuilder<'a>>
-//     {
-//         option_setter.set_option(self)
-//     }
-// }
+use crate::client::Client;
+use crate::header::HeaderList;
+use crate::option_setter::OptionSetter;
+use crate::subscription::{AckMode, MessageHandler, Subscription};
+
+pub struct SubscriptionBuilder<'a> {
+    pub session: &'a mut Client,
+    pub destination: &'a str,
+    pub ack_mode: AckMode,
+    pub handler: Box<dyn MessageHandler + Send>,
+    pub headers: HeaderList,
+}
+
+impl<'a> SubscriptionBuilder<'a> {
+    #[allow(dead_code)]
+    pub async fn start(self) -> crate::Result<String> {
+        let subscription = Subscription::new(
+            self.destination,
+            self.ack_mode,
+            self.headers.clone(),
+            self.handler,
+        );
+        self.session.subscribe(subscription).await
+    }
+
+    #[allow(dead_code)]
+    pub fn with<T>(self, option_setter: T) -> SubscriptionBuilder<'a>
+    where
+        T: OptionSetter<SubscriptionBuilder<'a>>,
+    {
+        option_setter.set_option(self)
+    }
+}

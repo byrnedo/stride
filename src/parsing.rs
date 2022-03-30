@@ -1,6 +1,6 @@
 use crate::frame::{Command, Frame, Transmission};
 use crate::header::{Header, HeaderList};
-use bytes::{BytesMut, Buf};
+use bytes::{Buf, BytesMut};
 use nom::{
     alt, call, complete, do_parse, error_position, flat_map, is_not, many0, many1, map, named, tag,
     take,

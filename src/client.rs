@@ -1,37 +1,25 @@
-use crate::connection::{ReadConnection, WriteConnection, connections};
-use crate::frame::{Frame, Command};
-use crate::frame::Transmission::{HeartBeat, CompleteFrame};
-use tokio::net::TcpStream;
-use tokio::sync::Mutex;
-use std::sync::{Arc};
-use crate::subscription::{AckMode, Subscription, AckOrNack};
-use std::collections::HashMap;
-use crate::{header, connection_config};
-use tracing::{debug, info, error};
+use crate::connection::{connections, ReaderCommand, SubscribeMessage, WriteSender, ReadSender};
 use crate::connection_config::ConnectionConfig;
-use tokio::io::{AsyncWriteExt};
-use std::{mem, fmt, io};
-use tokio::task;
-use crate::client::Error::UnknownEvent;
+use crate::frame::Frame;
+use crate::header;
+use crate::subscription::{AckMode, AckOrNack, Subscription};
+use std::sync::Arc;
+use std::{fmt, io};
 use tokio::net::tcp::ReuniteError;
-use tokio::sync::oneshot;
+use tokio::net::TcpStream;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::{Receiver};
+use tokio::sync::Mutex;
+use tracing::{debug, info};
 
-const GRACE_PERIOD_MULTIPLIER: f32 = 2.0;
+// const GRACE_PERIOD_MULTIPLIER: f32 = 2.0;
 
-
-struct Connection {
-    read: Mutex<ReadConnection>,
-    write: Mutex<WriteConnection>,
-}
-
-
-#[derive(Clone)]
 pub struct Client {
     config: ConnectionConfig,
-    connection: Arc<Connection>,
-    pub(crate) events: Arc<Mutex<Vec<SessionEvent>>>,
-    pub(crate) state: Arc<SessionState>,
-    kill_reader_chan: Arc<Mutex<Option<oneshot::Sender<bool>>>>,
+    pub(crate) state: Arc<Mutex<SessionState>>,
+    response_receiver: Option<Receiver<SessionEvent>>,
+    pub(crate) read_cmd_sender: Option<ReadSender>,
+    write_cmd_sender: Option<WriteSender>,
 }
 
 #[derive(Debug)]
@@ -67,7 +55,6 @@ impl fmt::Display for SessionEvent {
     }
 }
 
-
 #[derive(Debug)]
 pub enum DisconnectionReason {
     RecvFailed(::std::io::Error),
@@ -84,36 +71,35 @@ pub struct OutstandingReceipt {
 
 impl OutstandingReceipt {
     pub fn new(original_frame: Frame) -> Self {
-        OutstandingReceipt {
-            original_frame
-        }
+        OutstandingReceipt { original_frame }
     }
 }
 
 pub struct SessionState {
-    // next_transaction_id: u32,
-    // next_subscription_id: u32,
-    // next_receipt_id: u32,
-    pub rx_heartbeat_ms: Mutex<Option<u32>>,
-    pub tx_heartbeat_ms: Mutex<Option<u32>>,
+    #[allow(unused)]
+    next_transaction_id: u32,
+    next_subscription_id: u32,
+    next_receipt_id: u32,
+    pub rx_heartbeat_ms: Option<u32>,
+    pub tx_heartbeat_ms: Option<u32>,
     // pub rx_heartbeat_timeout: Option<Timeout>,
     // pub tx_heartbeat_timeout: Option<Timeout>,
-    pub subscriptions: Mutex<HashMap<String, Subscription>>,
-    pub outstanding_receipts: HashMap<String, OutstandingReceipt>,
+    // pub subscriptions: HashMap<String, Subscription>,
+    // pub outstanding_receipts: HashMap<String, OutstandingReceipt>,
 }
 
 impl SessionState {
     pub fn new() -> SessionState {
         SessionState {
-            // next_transaction_id: 0,
-            // next_subscription_id: 0,
-            // next_receipt_id: 0,
-            rx_heartbeat_ms: Mutex::new(None),
+            next_transaction_id: 0,
+            next_subscription_id: 0,
+            next_receipt_id: 0,
+            rx_heartbeat_ms: None,
             // rx_heartbeat_timeout: None,
-            tx_heartbeat_ms: Mutex::new(None),
+            tx_heartbeat_ms: None,
             // tx_heartbeat_timeout: None,
-            subscriptions: Mutex::new(HashMap::new()),
-            outstanding_receipts: HashMap::new(),
+            // subscriptions: HashMap::new(),
+            // outstanding_receipts: HashMap::new(),
         }
     }
 }
@@ -122,6 +108,7 @@ impl SessionState {
 pub enum Error {
     UnknownEvent(SessionEvent),
     ReuniteError(ReuniteError),
+    ChannelError(String),
     StdIOError(io::Error),
 }
 
@@ -143,240 +130,229 @@ impl fmt::Display for Error {
             Error::UnknownEvent(e) => write!(f, "unknown event {}", e),
             Error::StdIOError(e) => write!(f, "{}", e),
             Error::ReuniteError(e) => write!(f, "{}", e),
+            Error::ChannelError(e) => write!(f, "{}", e),
         }
     }
 }
 
 impl Client {
     pub(crate) fn new(stream: TcpStream, config: ConnectionConfig) -> Self {
-        let (r, w) = connections(stream);
+        debug!("connections starting");
+        let (sender, receiver, write_sender) = connections(stream);
+        debug!("connections started");
         // start reader from stream
-        let client = Client {
+        Client {
             config,
-            connection: Arc::new(Connection { read: Mutex::new(r), write: Mutex::new(w) }),
-            events: Arc::new(Mutex::new(vec!())),
-            state: Arc::new(SessionState::new()),
-            kill_reader_chan: Arc::new(Mutex::new(None)),
-        };
-        // let subs = client.state.subscriptions.clone();
-        // let events = client.events.clone();
-        //
-        // let c_clone = client.connection.clone();
-
-
-        client
-    }
-
-
-    pub async fn send(&self, fr: Frame) -> crate::Result<()> {
-        let mut c = self.connection.write.lock().await;
-        c.write_transmission(CompleteFrame(fr)).await.map_err(|e| e.into())
-    }
-
-    pub async fn connect(&mut self) -> crate::Result<()> {
-        let _ = self.kill_reader().await;
-        let mut c = self.connection.write.lock().await;
-        let _ = c.write_transmission(CompleteFrame(Frame::connect(1000, 1000))).await?;
-        drop(c);
-        let res = self.read_one_and_handle().await.map_err::<Error, _>(|e| e.into())?;
-
-        match res {
-            Some(SessionEvent::Connected) => {
-                let (tx, rx) = oneshot::channel::<bool>();
-                self.kill_reader_chan = Arc::new(Mutex::new(Some(tx)));
-                let client = self.clone();
-                task::spawn(async move {
-                    tokio::select! {
-                        _ = client.read_loop() => {},
-                        _ = rx => {
-                            debug!("reader killed")
-                        },
-                    }
-                });
-                Ok(())
-            }
-            Some(rest) => Err(UnknownEvent(rest)),
-            None => Ok(())
+            state: Arc::new(Mutex::new(SessionState::new())),
+            response_receiver: Some(receiver),
+            read_cmd_sender: Some(sender),
+            write_cmd_sender: Some(write_sender),
         }
     }
 
-    pub async fn acknowledge_frame(&mut self, frame: &Frame, which: AckOrNack) -> crate::Result<()> {
+    pub async fn send(&self, fr: Frame) -> crate::Result<()> {
+        self.write_cmd_sender.as_ref().unwrap().send_frame(fr).await
+    }
+
+    pub async fn connect(&mut self) -> crate::Result<()> {
+        let _ = self.send(Frame::connect(1000, 1000)).await?;
+
+        let receiver = self.response_receiver.as_mut().unwrap();
+        let res = receiver.recv().await;
+
+        match res {
+            Some(SessionEvent::Connected) => Ok(()),
+            _ => {
+                //TODO: meaningful error
+                Err(Error::StdIOError(io::Error::from(
+                    io::ErrorKind::ConnectionAborted,
+                )))
+            }
+        }
+    }
+
+    pub async fn acknowledge_frame(&self, frame: &Frame, which: AckOrNack) -> crate::Result<()> {
         if let Some(header::Ack(ack_id)) = frame.headers.get_ack() {
             let ack_frame = if let AckOrNack::Ack = which {
                 Frame::ack(ack_id)
             } else {
                 Frame::nack(ack_id)
             };
+
             return self.send(ack_frame).await;
         }
         Ok(())
     }
     pub async fn disconnect(&mut self) -> crate::Result<()> {
-        let _ = self.kill_reader().await;
+        // let _ = self.kill_reader().await;
         self.send(Frame::disconnect()).await
-    }
-    pub async fn kill_reader(&self) -> Result<(), bool> {
-        let mut tx = self.kill_reader_chan.lock().await;
-
-        if let Some(tx) = mem::replace(&mut *tx, None) {
-            return tx.send(true);
-        }
-        Ok(())
     }
 
     pub async fn reconnect(&mut self) -> crate::Result<()> {
         use std::net::ToSocketAddrs;
 
+        // TODO: send shutdown signal to writer or reader
+
+        let _ = self.write_cmd_sender.as_ref().unwrap().shutdown().await;
+        let _ = self.read_cmd_sender.as_ref().unwrap().shutdown().await;
+
         info!("Reconnecting...");
 
         let address = (&self.config.host as &str, self.config.port)
-            .to_socket_addrs()?.nth(0)
-            .ok_or(io::Error::new(io::ErrorKind::Other, "address provided resolved to nothing"))?;
-
+            .to_socket_addrs()?
+            .nth(0)
+            .ok_or(io::Error::new(
+                io::ErrorKind::Other,
+                "address provided resolved to nothing",
+            ))?;
 
         let stream = TcpStream::connect(&address).await?;
-        let (r, w) = connections(stream);
+        let (sender, receiver, write_sender) = connections(stream);
 
-        {
-            let mut old_r = self.connection.read.lock().await;
-            let mut old_w = self.connection.write.lock().await;
-            let old_w = mem::replace(&mut *old_w, w);
-            let old_r = mem::replace(&mut *old_r, r);
+        self.response_receiver = Some(receiver);
+        self.read_cmd_sender = Some(sender);
+        self.write_cmd_sender = Some(write_sender);
 
-            if let Ok(mut old_stream) = old_w.writer.reunite(old_r.reader).map_err::<Error, _>(|e| e.into()) {
-                old_stream.shutdown().await?
-            }
-        }
+        // {
+        //     let mut old_r = self.connection.read.lock().await;
+        //     let mut old_w = self.connection.write.lock().await;
+        //     let old_w = mem::replace(&mut *old_w, w);
+        //     let old_r = mem::replace(&mut *old_r, r);
+        //
+        //     if let Ok(mut old_stream) = old_w
+        //         .writer
+        //         .reunite(old_r.reader)
+        //         .map_err::<Error, _>(|e| e.into())
+        //     {
+        //         old_stream.shutdown().await?
+        //     }
+        // }
 
         self.connect().await
     }
 
     fn _on_message(&mut self, _frame: Frame) {}
 
-    async fn read_one_and_handle(&self) -> crate::Result<Option<SessionEvent>> {
-        let mut r = self.connection.read.lock().await;
-        match r.read_transmission().await {
-            Ok(Some(CompleteFrame(frame))) => {
-                debug!("Received frame: {:?}", frame);
-                match frame.command {
-                    Command::Error => {
-                        Ok(Some(SessionEvent::ErrorFrame(frame)))
+    #[allow(unused)]
+    async fn generate_transaction_id(&mut self) -> u32 {
+        let mut state = self.state.lock().await;
+        let id = state.next_transaction_id;
+        state.next_transaction_id += 1;
+        id
+    }
+
+    pub async fn generate_subscription_id(&mut self) -> u32 {
+        let mut state = self.state.lock().await;
+        let id = state.next_subscription_id;
+        state.next_subscription_id += 1;
+        id
+    }
+
+    pub async fn generate_receipt_id(&mut self) -> u32 {
+        let mut state = self.state.lock().await;
+        let id = state.next_receipt_id;
+        state.next_receipt_id += 1;
+        id
+    }
+    pub async fn subscribe(&mut self, mut subscription: Subscription) -> crate::Result<String> {
+        let next_id = self.generate_subscription_id().await;
+
+        let sub_id = format!("stomp-rs/{}", next_id);
+
+        let mut subscribe_frame = Frame::subscribe(
+            &sub_id.clone(),
+            &subscription.destination,
+            subscription.ack_mode,
+        );
+
+        subscribe_frame
+            .headers
+            .concat(&mut subscription.headers.clone());
+
+        self.send(subscribe_frame).await?;
+        debug!(
+            "Registering callback for subscription id '{}' from builder",
+            sub_id
+        );
+
+        // TODO buffer size
+        let (tx, mut rx) = mpsc::channel::<Frame>(100);
+
+        let sender = self.read_cmd_sender.as_mut();
+        sender
+            .unwrap()
+            .send(ReaderCommand::Subscribe(SubscribeMessage {
+                id: sub_id.clone(),
+                destination: subscription.destination.clone(),
+                resp: tx,
+            }))
+            .await?;
+
+        let sender = self.write_cmd_sender.as_ref().unwrap().clone();
+
+        tokio::task::spawn(async move {
+            while let Some(frame) = rx.recv().await {
+                let ack = frame.headers.get_ack();
+                let callback_result = subscription.handler.on_message(&frame);
+                debug!("Executing.");
+                match subscription.ack_mode {
+                    AckMode::Auto => {
+                        debug!("Auto ack, no frame sent.");
                     }
-                    // Command::Receipt => self.handle_receipt(frame),
-                    Command::Connected => Ok(Some(self.clone().on_connected_frame_received(frame).await?)),
-                    Command::Message => Ok(Some(self.clone().on_message(frame).await?)),
-                    _ => {
-                        Ok(Some(SessionEvent::UnknownFrame(frame)))
+                    AckMode::Client | AckMode::ClientIndividual => {
+                        if let Some(ack) = ack {
+                            let _ = sender
+                                .send_frame(match callback_result {
+                                    AckOrNack::Ack => Frame::ack(ack.0),
+                                    _ => Frame::nack(ack.0),
+                                })
+                                .await;
+                        }
                     }
                 }
             }
-            Ok(Some(HeartBeat)) => {
-                debug!("Received heartbeat");
-                let mut w = self.connection.write.lock().await;
-                let _ = w.write_transmission(HeartBeat).await;
-                Ok(None)
-            }
-            Ok(None) => {
-                debug!("Received nothing");
-                Ok(None)
-            }
+        });
 
-            Err(err) => {
-                error!("Received error: {}", err);
-                Err(err)
-            }
-        }
-    }
-
-    async fn read_loop(self) -> crate::Result<()> {
-        while let res = self.read_one_and_handle().await {
-            match res {
-                Ok(Some(evt)) => {
-                    let mut events = self.events.lock().await;
-                    events.push(evt);
-                }
-                Ok(None) => {}
-                Err(err) => return Err(err.into())
-            }
-        }
-        Ok(())
-    }
-
-    async fn on_message(self, frame: Frame) -> crate::Result<SessionEvent> {
-        debug!("command: {}", frame.command);
-        debug!("{:?}", frame);
-        let mut sub_data = None;
-
-        if let Some(header::Subscription(sub_id)) = frame.headers.get_subscription() {
-            let subs = self.state.subscriptions.lock().await;
-            if let Some(ref sub) = subs.get(sub_id) {
-                sub_data = Some((sub.destination.clone(), sub.ack_mode));
-            }
-        }
-
-        if let Some((destination, ack_mode)) = sub_data {
-            Ok(SessionEvent::Message {
-                destination,
-                ack_mode,
-                frame,
-            })
-        } else {
-            debug!("subless frame");
-            Ok(SessionEvent::SubscriptionlessFrame(frame))
-        }
-    }
-
-    async fn on_connected_frame_received(self, connected_frame: Frame) -> crate::Result<SessionEvent> {
-        // The Client's requested tx/rx HeartBeat timeouts
-        let connection_config::HeartBeat(client_tx_ms, client_rx_ms) = self.config.heartbeat;
-
-        // The timeouts the server is willing to provide
-        let (server_tx_ms, server_rx_ms) = match connected_frame.headers.get_heart_beat() {
-            Some(header::HeartBeat(tx_ms, rx_ms)) => (tx_ms, rx_ms),
-            None => (0, 0),
-        };
-
-        let (agreed_upon_tx_ms, agreed_upon_rx_ms) = ConnectionConfig::select_heartbeat(client_tx_ms,
-                                                                                        client_rx_ms,
-                                                                                        server_tx_ms,
-                                                                                        server_rx_ms);
-        let mut rxh = self.state.rx_heartbeat_ms.lock().await;
-        *rxh = Some((agreed_upon_rx_ms as f32 * GRACE_PERIOD_MULTIPLIER) as u32);
-
-        let mut txh = self.state.tx_heartbeat_ms.lock().await;
-        *txh = Some((agreed_upon_tx_ms as f32 * GRACE_PERIOD_MULTIPLIER) as u32);
-
-
-        // self.register_tx_heartbeat_timeout()?;
-        // self.register_rx_heartbeat_timeout()?;
-
-        Ok(SessionEvent::Connected)
+        Ok(sub_id.to_string())
     }
 }
 
 mod test {
     use crate::client_builder;
-    use crate::frame::Frame;
-    use tokio::time::Duration;
-    use tracing::{debug};
-    use tracing_subscriber;
     use crate::connection_config::HeartBeat;
+    use crate::frame::Frame;
+    use crate::header::HeaderList;
     use crate::subscription::AckMode;
+    use crate::subscription::AckOrNack::Ack;
+    use crate::subscription_builder::SubscriptionBuilder;
+    use tokio::time::Duration;
+    use tracing::debug;
+    use tracing_subscriber;
 
     #[tokio::test]
     async fn test_connect() {
         let _ = tracing_subscriber::fmt::try_init();
+        debug!("starting");
         let mut client = client_builder::ClientBuilder::new("localhost", 6379)
             .with(HeartBeat(500, 300))
-            .start().await.unwrap();
-        debug!("{:?} {:?}", client.state.rx_heartbeat_ms, client.state.tx_heartbeat_ms);
+            .start()
+            .await
+            .unwrap();
         let con_res = client.connect().await;
         assert!(!con_res.is_err(), "should be no error connecting");
 
-        debug!("{:?} {:?}", client.state.rx_heartbeat_ms, client.state.tx_heartbeat_ms);
-
-        let send_res = client.send(Frame::subscribe("1", "test", AckMode::Client)).await;
-        assert!(!send_res.is_err(), "should be no error sending frame");
+        let sb = SubscriptionBuilder {
+            session: &mut client,
+            destination: "test",
+            ack_mode: AckMode::Client,
+            handler: Box::new(|f: &Frame| {
+                debug!("HEEEEEEY {}", f.command);
+                Ack
+            }),
+            headers: HeaderList::new(),
+        };
+        let _ = sb.start().await;
+        debug!("started");
 
         let send_res = client.send(Frame::send("test", "test".as_ref())).await;
         assert!(!send_res.is_err(), "should be no error sending frame");
